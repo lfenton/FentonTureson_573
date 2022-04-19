@@ -1,0 +1,156 @@
+---
+title: "hw9_TuresonKayla"
+author: "Kayla Tureson"
+date: "`r Sys.Date()`"
+output:
+  github_document:
+    toc: true
+ 
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load-pkg, message = FALSE}
+#library(papaja) #package not compatible
+library(psych)
+library(ggplot2)  # for plots
+library(tinytex)
+library(here)
+library(readxl)  # for reading excel files
+library(modelsummary)  # for summarizing data
+library(rstan)
+library(magrittr)  # for `%>%` operator
+rstan_options(auto_write = TRUE)  # save compiled STAN object
+options(mc.cores = 2)  # use two cores
+library(posterior)
+library(bayesplot)
+library(dplyr)
+library(kableExtra)
+theme_set(theme_classic() +
+    theme(panel.grid.major.y = element_line(color = "grey92")))
+```
+
+## Research Question
+
+* Does an exercise intervention influence amyloid accumulation in the brain?
+
+# Variables
+
+- `amyloid_accum`: accumulation of amyloid from pre (baseline) to post (wk52) intervention
+- `apx_group`: AExSupport = aerobic exercise condition, NoSupport = control condition
+
+# Import Data
+
+# Data obtained from: https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/B9I1F8
+
+# Study title: Effect of aerobic exercise on amyloid accumulation in preclinical Alzheimer’s: A 1-year randomized controlled trial
+
+```{r}
+# load the data
+exercise <- read_excel(here("APEx_FinalData_20201021.xlsx"))
+
+# subset only individuals who have baseline and follow up data
+tt <- table(exercise$study_id)
+exercise2 <- subset(exercise, study_id %in% names(tt[tt == 3]))
+
+# create a new variable (amyloid_accum) for amyloid accumulation from baseline to week 52 (smaller values are better)
+exercise3 <- 
+exercise2 %>% 
+  group_by(study_id)  %>% 
+  mutate(amyloid_accum = amyloid_Mean6_CB[timept=="WK52"] -              amyloid_Mean6_CB[timept=="BL"])
+
+# subset only the first entry of each participant 
+exercise.subset <- 
+  exercise3 %>% 
+  group_by(study_id) %>% 
+  filter(row_number()==1)
+
+# change the condition variable to a factor
+exercise.subset$apx_group <- as.factor(exercise.subset$apx_group)
+
+# remove NAs so that STAN will run later
+exercise.subset <- na.omit(exercise.subset)
+```
+
+## Variable Summary 
+
+```{r summ-var}
+## can't get N to work, not sure why 
+datasummary(amyloid_accum * 
+                (Mean + SD + Min + Max + Histogram) ~ 
+                factor(apx_group),
+            data = exercise.subset,
+caption = "Summary Statistics") %>%
+    # add table note
+    add_footnote("SD = standard deviation", notation = "none")
+
+```
+
+# Model
+
+Let $Y$ = change in amyloid from baseline to week 52 (week 52 - baseline; smaller values indicate less accumulation), $G$ = treatment condition
+Model:
+$$
+  \begin{aligned}
+    Y_{i, G = 0} & \sim N(\mu_1, \sigma_1) \\
+    Y_{i, G = 1} & \sim N(\mu_2, \sigma_2)
+  \end{aligned}
+$$
+
+Prior:
+$$
+  \begin{aligned}
+    \mu_1 & \sim N(3, 2) \\
+    \mu_2 & \sim N(3, 2) \\
+    \sigma_1 & \sim N^+(0, 2) \\
+    \sigma_2 & \sim N^+(0, 2)
+  \end{aligned}
+$$
+
+# Run Stan 
+
+We used 4 chains, each with 4,000 iterations (the first 2,000 used as warm-ups).
+
+```{r m1, results = "hide"}
+# Rescale data so all are greater than 0 and STAN will run (chose .16 based on min values from summary data)
+exercise.subset$amyloid_accum_rescale <- exercise.subset$amyloid_accum + .16
+
+# 1. form the data list for Stan
+stan_dat <- with(exercise.subset,
+    list(N1 = sum(apx_group == "NoSupport"),
+         N2 = sum(apx_group == "AExSupport"),
+         y1 = amyloid_accum_rescale[which(apx_group == "NoSupport")],
+         y2 = amyloid_accum_rescale[which(apx_group == "AExSupport")])
+)
+# 2. Run Stan
+m1 <- stan(
+    file = here("normal_2group.stan"),
+    data = stan_dat,
+    seed = 1234,  # for reproducibility
+    iter = 4000
+)
+```
+
+# Results
+
+As shown in the graph below, the chains mixed well.
+
+```{r rank-hist-m1}
+mcmc_rank_hist(m1, pars = c("mu1", "mu2", "sigma1", "sigma2"))
+```
+
+The following table shows the posterior distributions of $\mu_1$, $\mu_2$, $\sigma_1$, $\sigma_2$, and $\mu_2 - \mu_1$.
+
+```{r summ-m1}
+summ_m1 <- as_draws_df(m1) %>%
+    subset_draws(variable = c("mu1", "mu2", "sigma1", "sigma2")) %>%
+    mutate_variables(`mu2 - mu1` = mu2 - mu1) %>%
+    summarise_draws()
+knitr::kable(summ_m1, digits = 2)
+```
+
+
+
+* Based on our analysis, the results show there was no difference in amyloid accumulation from baseline to week 52 between the two groups (i.e., exercise intervention group and education control condition). The posterior mean in the exercise intervention group was 0.17, whereas the posterior mean in the education control group was 0.16. Additionally, the 90% CIs were the same in both the exercise intervention group and the education control group. Of note, data were transformed prior to running our model, and therefore the actual values are 0.16 less than those provided in the table above.
