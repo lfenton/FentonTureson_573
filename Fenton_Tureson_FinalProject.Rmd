@@ -1,0 +1,345 @@
+---
+title: "Fenton & Tureson 573 Final Project"
+author: "Laura Fenton & Kayla Tureson"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load-pkg, message = FALSE}
+library(ggplot2)  # for plots
+library(tinytex)
+library(here)
+library(readxl)  # for reading excel files
+library(modelsummary)  # for summarizing data
+library(rstan)
+rstan_options(auto_write = TRUE)  # save compiled STAN object
+options(mc.cores = 2)  # use two cores
+library(posterior)
+library(bayesplot)
+library(dplyr)
+library(kableExtra)
+library(dagitty)
+library(brms)
+library(ggdag)  # render DAGs in ggplot style
+theme_set(theme_classic() +
+    theme(panel.grid.major.y = element_line(color = "grey92")))
+```
+
+# Research Questions
+
+> Is there a difference in amyloid accumulation between individuals in the control condition and the exercise intervention condition?
+> Is there a difference in hippocampal atrophy between individuals in the control condition and the exercise intervention condition?
+> Does VO2 max change mediate the relationship between treatment condition and hippocampal atrophy rate?
+
+# Variables
+
+- `amyloid_accum`: accumulation of amyloid from pre (baseline) to post (wk52) intervention
+- `Hippocampus_change`: hippocampal atrophy from (baseline) to post (wk52) intervention
+- `VO2_change`: change in VO2 max from (baseline) to post (wk52) intervention
+- `apx_group`: AExSupport = aerobic exercise condition, NoSupport = control condition
+
+## Import Data
+
+```{r exercise}
+# load the data
+exercise <- read_excel(here("APEx_FinalData_20201021.xlsx"))
+
+# subset only individuals who have baseline and follow up data
+tt <- table(exercise$study_id)
+exercise2 <- subset(exercise, study_id %in% names(tt[tt == 3]))
+
+# log transform key variables
+exercise2$amyloid_Mean6_CB <- log(exercise2$amyloid_Mean6_CB)
+exercise2$Hippocampus_Vol_mL <- log(exercise2$Hippocampus_Vol_mL)
+exercise2$apx_exppt_vo2mx_ml <- log(exercise2$apx_exppt_vo2mx_ml)
+
+# create new variables: (amyloid_accum) for amyloid accumulation from baseline 
+# to week 52 (smaller values are better); (Hippocampus_change) for hippocampal neurodegeneration from baseline to week 52 (smaller values are better); (VO2_change) for increase in VO2 max from baseline to 52 (larger values are better)
+exercise3 <- 
+exercise2 %>% 
+  group_by(study_id)  %>% 
+  mutate(amyloid_accum = amyloid_Mean6_CB[timept=="WK52"] -
+           amyloid_Mean6_CB[timept=="BL"],
+         Hippocampus_change = Hippocampus_Vol_mL[timept=="BL"] -
+           Hippocampus_Vol_mL[timept=="WK52"],
+         VO2_change = apx_exppt_vo2mx_ml[timept=="WK52"] -
+           apx_exppt_vo2mx_ml[timept=="BL"])
+
+# subset only the first entry of each participant 
+ exercise.subset <- 
+  exercise3 %>% 
+  group_by(study_id) %>% 
+  filter(row_number()==1)
+
+# subset only the third entry of each participant 
+exercise.subset.wk52 <- 
+  exercise3 %>% 
+  group_by(study_id) %>% 
+  filter(row_number()==3)
+
+# change the condition variable to a factor
+exercise.subset$apx_group <- as.factor(exercise.subset$apx_group)
+
+# remove NAs so that STAN will run later
+exercise.subset <- na.omit(exercise.subset)
+
+# create new variable for condition and set as integer
+exercise.subset$apx_group_coded <- ifelse(exercise.subset$apx_group=="NoSupport", 0, ifelse(exercise.subset$apx_group=="AExSupport", 1, NA))
+
+exercise.subset$apx_group_coded <- as.integer(exercise.subset$apx_group_coded)
+```
+
+## Visualize data
+
+```{r visualize}
+# Visualize baseline variables
+ggplot(exercise.subset, aes(x=amyloid_Mean6_CB, color=apx_group)) +
+  geom_histogram(fill="white", alpha=0.5, position="identity")
+
+ggplot(exercise.subset, aes(x=Hippocampus_Vol_mL, color=apx_group)) +
+  geom_histogram(fill="white", alpha=0.5, position="identity")
+
+ggplot(exercise.subset, aes(x=apx_exppt_vo2mx_ml, color=apx_group)) +
+  geom_histogram(fill="white", alpha=0.5, position="identity")
+
+#Visualize week 52 variables
+
+ggplot(exercise.subset.wk52, aes(x=amyloid_Mean6_CB, color=apx_group)) +
+  geom_histogram(fill="white", alpha=0.5, position="identity")
+
+ggplot(exercise.subset.wk52, aes(x=Hippocampus_Vol_mL, color=apx_group)) +
+  geom_histogram(fill="white", alpha=0.5, position="identity")
+
+ggplot(exercise.subset.wk52, aes(x=apx_exppt_vo2mx_ml, color=apx_group)) +
+  geom_histogram(fill="white", alpha=0.5, position="identity")
+
+# Visualize change variables
+ggplot(exercise.subset, aes(x=amyloid_accum, color=apx_group)) +
+  geom_histogram(fill="white", alpha=0.5, position="identity")
+
+ggplot(exercise.subset, aes(x=Hippocampus_change, color=apx_group)) +
+  geom_histogram(fill="white", alpha=0.5, position="identity")
+
+ggplot(exercise.subset, aes(x=VO2_change, color=apx_group)) +
+  geom_histogram(fill="white", alpha=0.5, position="identity")
+```
+
+## Variable Summary
+
+```{r summ-var}
+## can't get N to work, not sure why 
+datasummary(amyloid_accum * 
+                (Mean + SD + Min + Max + Histogram) ~ 
+                factor(apx_group),
+            data = exercise.subset,
+caption = "Summary Statistics") %>%
+    # add table note
+    add_footnote("SD = standard deviation", notation = "none")
+
+datasummary(Hippocampus_change * 
+                (Mean + SD + Min + Max + Histogram) ~ 
+                factor(apx_group),
+            data = exercise.subset,
+caption = "Summary Statistics") %>%
+    # add table note
+    add_footnote("SD = standard deviation", notation = "none")
+
+```
+
+# Model Amyloid Accumulation
+
+Let $Y_A$ = change in amyloid from baseline to week 52 (week 52 - baseline; smaller values indicate less accumulation), $G$ = treatment condition
+Model:
+$$
+  \begin{aligned}
+    Y_{Ai, G = 0} & \sim N(\mu_1, \sigma_1) \\
+    Y_{Ai, G = 1} & \sim N(\mu_2, \sigma_2)
+  \end{aligned}
+$$
+
+Prior:
+$$
+  \begin{aligned}
+    \mu_1 & \sim N(3, 2) \\
+    \mu_2 & \sim N(3, 2) \\
+    \sigma_1 & \sim N^+(0, 2) \\
+    \sigma_2 & \sim N^+(0, 2)
+  \end{aligned}
+$$
+
+## Running Stan
+
+We used 4 chains, each with 4,000 iterations (first 2,000 as warm-ups). 
+
+```{r m1, results = "hide"}
+# Rescale data so all are greater than 0 and STAN will run (chose .13 based 
+# on min values from summary data)
+exercise.subset$amyloid_accum_rescale <- exercise.subset$amyloid_accum + .13
+
+# 1. form the data list for Stan
+stan_dat <- with(exercise.subset,
+    list(N1 = sum(apx_group == "NoSupport"),
+         N2 = sum(apx_group == "AExSupport"),
+         y1 = amyloid_accum_rescale[which(apx_group == "NoSupport")],
+         y2 = amyloid_accum_rescale[which(apx_group == "AExSupport")])
+)
+
+# 2. Run Stan
+m1 <- stan(
+    file = here("robust_2group.stan"),
+    data = stan_dat,
+    seed = 1234,  # for reproducibility
+    iter = 4000
+)
+```
+
+# Results
+
+As shown in the graph below, the chains mixed well.
+
+```{r rank-hist-m1}
+mcmc_rank_hist(m1, pars = c("mu1", "mu2", "sigma1", "sigma2"))
+```
+
+The following table shows the posterior distributions of $\mu_1$, $\mu_2$, $\sigma_1$, $\sigma_2$, and $\mu_2 - \mu_1$.
+
+```{r summ-m1}
+summ_m1 <- as_draws_df(m1) %>%
+    subset_draws(variable = c("mu1", "mu2", "sigma1", "sigma2")) %>%
+    mutate_variables(`mu2 - mu1` = mu2 - mu1) %>%
+    summarise_draws()
+knitr::kable(summ_m1, digits = 2)
+```
+
+The analysis showed that on average, there was no difference in amyloid accumulation from baseline to week 52 between individuals in the aerobic exercise condition and individuals in the education control condition. Individuals in both the control condition and intervention condition had a posterior mean of 0.14. The 90% CI's were identical for both groups. As a reminder, the actual values are .14 lower than those we see in the table, due to data transformation prior to running our model.
+
+# Model Hippocampal Neurodegeneration
+
+Let $Y_A$ = change in amyloid from baseline to week 52 (week 52 - baseline; smaller values indicate less accumulation), $G$ = treatment condition
+Model:
+$$
+  \begin{aligned}
+    Y_{Hi, G = 0} & \sim N(\mu_1, \sigma_1) \\
+    Y_{Hi, G = 1} & \sim N(\mu_2, \sigma_2)
+  \end{aligned}
+$$
+
+Prior:
+$$
+  \begin{aligned}
+    \mu_1 & \sim N(3, 2) \\
+    \mu_2 & \sim N(3, 2) \\
+    \sigma_1 & \sim N^+(0, 2) \\
+    \sigma_2 & \sim N^+(0, 2)
+  \end{aligned}
+$$
+
+## Running Stan
+
+We used 4 chains, each with 4,000 iterations (first 2,000 as warm-ups). 
+
+```{r m2, results = "hide"}
+# Rescale data so all are greater than 0 and STAN will run (chose .03 based 
+# on min values from summary data)
+exercise.subset$Hippocampus_change_rescale <- exercise.subset$Hippocampus_change + .03
+
+# 1. form the data list for Stan
+stan_dat_2 <- with(exercise.subset,
+    list(N1 = sum(apx_group == "NoSupport"),
+         N2 = sum(apx_group == "AExSupport"),
+         y1 = Hippocampus_change_rescale[which(apx_group == "NoSupport")],
+         y2 = Hippocampus_change_rescale[which(apx_group == "AExSupport")])
+)
+# 2. Run Stan
+m2 <- stan(
+    file = here("robust_2group.stan"),
+    data = stan_dat_2,
+    seed = 1234,  # for reproducibility
+    iter = 4000
+)
+```
+
+# Results
+
+As shown in the graph below, the chains mixed well.
+
+```{r rank-hist-m2}
+mcmc_rank_hist(m2, pars = c("mu1", "mu2", "sigma1", "sigma2"))
+```
+
+The following table shows the posterior distributions of $\mu_1$, $\mu_2$, $\sigma_1$, $\sigma_2$, and $\mu_2 - \mu_1$.
+
+```{r summ-m2}
+summ_m2 <- as_draws_df(m2) %>%
+    subset_draws(variable = c("mu1", "mu2", "sigma1", "sigma2")) %>%
+    mutate_variables(`mu2 - mu1` = mu2 - mu1) %>%
+    summarise_draws()
+knitr::kable(summ_m2, digits = 2)
+```
+
+The analysis showed that on average, there was no difference in hippocampal neurodegeneration from baseline to week 52 between individuals in the aerobic exercise condition and individuals in the education control condition. Individuals in the exercise and control conditions both had a posterior mean of 0.04, and the confidence intervals were identical. As a reminder, the actual values are .03 lower than those we see in the table, due to data transformation prior to running our model.
+
+## Mediation
+
+```{r dag1}
+dag1 <- dagitty(
+    "dag{
+      C -> HV; C -> V; V -> HV
+    }"
+)
+coordinates(dag1) <- list(x = c(C = 0, V = 1, HV = 2),
+                          y = c(C = 0, V = 1, HV = 0))
+# Plot
+ggdag(dag1) + theme_dag()
+```
+```{r}
+get_prior(Hippocampus_change ~ apx_group_coded + VO2_change,
+          data = exercise.subset,
+          family = gaussian(link = "identity"))
+
+get_prior(VO2_change ~ apx_group_coded,
+         data = exercise.subset,
+         family = gaussian(link = "identity"))
+
+prior_m <- prior(normal(0, 1), class = "b") 
+m_med <- brm(
+        bf(Hippocampus_change ~ apx_group_coded + VO2_change) +
+        bf(VO2_change ~ apx_group_coded) +
+        set_rescor(FALSE),
+       family = list(gaussian("identity"), gaussian("identity")),
+       data = exercise.subset,
+       prior = prior(normal(1,1), class = "b", resp = "VO2change") +
+        prior(student_t(3, 0, 2.5), class = "sigma", resp = "VO2change") +
+        prior(normal(1, 1), class = "b", resp = "Hippocampuschange"),
+      seed = 1338,
+      iter = 4000
+)
+print(m_med)
+```
+
+
+
+$$VO2 change_{i} \sim N(\mu^v_{i}, \sigma^jv)$$
+$$\mu^v_{i} = \beta^v_0 + \beta_1group_i$$
+$$hippocampuschange_{i} \sim N(\mu^h_{i}, \sigma^h)$$
+$$\mu^h_{i} = \beta^h_0 + \beta_2VO2change_i +\beta_3group_{i}$$
+$$\beta^v_0, \beta^h_0 \sim N(0, 1)$$
+$$\beta_1, \beta_2, \beta_3 \sim N(0,1)$$
+$$\sigma \sim t^+_{3}(0,2.5)$$
+```
+
+```{r pp checks}
+pp_check(m_med, resp = "VO2change")
+
+pp_check(m_med, resp = "Hippocampuschange")
+
+pp_check(m_med, type = "error_scatter_avg_vs_x", resp = "Hippocampuschange",
+x = "VO2_change")
+```
+
